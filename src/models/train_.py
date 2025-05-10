@@ -1,7 +1,7 @@
 from lifelines import KaplanMeierFitter
 import numpy as np
 import pandas as pd
-from lifelines.utils import concordance_index
+from lifelines import NelsonAalenFitter
 import warnings
 import pandas as pd
 from sksurv.ensemble import RandomSurvivalForest
@@ -106,9 +106,9 @@ if X_train.shape[0] == 0:
     y_test  = df.loc[~train_mask, ["T", "E"]]
 
 # --------------------------------------------------
-# 4) Kaplan-Meier 기반 Hazard Rate 추정
+# 4) Nelson-Aalen 기반 Hazard Rate 추정
 # --------------------------------------------------
-kmf = KaplanMeierFitter()
+naf = NelsonAalenFitter()
 df["issue_month"] = df["issue_d"].dt.to_period("M")
 monthly_hazards = {}
 
@@ -116,11 +116,11 @@ for month, group_df in df.groupby("issue_month"):
     if len(group_df) < 100:
         continue
     try:
-        kmf.fit(group_df["T"], event_observed=group_df["E"])
-        # hazard = f(t)/S(t) ≈ diff(1 - S(t)) / S(t)
-        surv = kmf.survival_function_
-        hazard = surv.diff().fillna(0).abs() / surv
-        monthly_hazards[str(month)] = hazard.mean().values[0]
+        naf.fit(group_df["T"], event_observed=group_df["E"])
+        cum_hazard = naf.cumulative_hazard_
+        # 순간 hazard ≈ 누적 hazard 차분
+        inst_hazard = cum_hazard.diff().fillna(0)
+        monthly_hazards[str(month)] = inst_hazard.mean().values[0]
     except Exception as e:
         print(f"⚠️ {month} 월 hazard 계산 오류: {e}")
         continue
@@ -128,8 +128,8 @@ for month, group_df in df.groupby("issue_month"):
 # hazard 평균값 시계열 시각화
 import matplotlib.pyplot as plt
 plt.figure(figsize=(12, 5))
-plt.plot(monthly_hazards.keys(), monthly_hazards.values(), marker="o", label="KM 추정 hazard")
-plt.title("Monthly Kaplan-Meier estimated Hazard Rate")
+plt.plot(monthly_hazards.keys(), monthly_hazards.values(), marker="o", label="NA estimated hazard")
+plt.title("Monthly Nelson-Aalen estimated Hazard Rate")
 plt.xlabel("issued month")
 plt.ylabel("avg Hazard")
 plt.xticks(rotation=45)
@@ -137,7 +137,7 @@ plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
-print("✅ KM 기반 월별 hazard 추정 완료")
+print("✅ NA 기반 월별 hazard 추정 완료")
 
 # --------------------------------------------------
 # 5) Random Survival Forest 모델 학습 & 평가 (covid_exposure 그룹별)

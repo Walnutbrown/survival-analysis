@@ -2,6 +2,7 @@
 *.csv
 *.parquet
 *.pkl
+.DS_Store
 
 # 시크릿 파일 무시
 .env
