@@ -1,0 +1,19 @@
+# 데이터 파일 무시
+*.csv
+*.parquet
+*.pkl
+
+# 시크릿 파일 무시
+.env
+*.env
+secrets/
+*.key
+*.pem
+*.p12
+
+# 캐시 및 임시 파일
+*.log
+*.tmp
+
+# Jupyter 자동 저장 디렉토리
+.ipynb_checkpoints/
