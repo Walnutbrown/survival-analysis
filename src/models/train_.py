@@ -1,17 +1,18 @@
-from lifelines import KaplanMeierFitter
 import numpy as np
 import pandas as pd
 from lifelines import NelsonAalenFitter
 import warnings
 import pandas as pd
 from sksurv.ensemble import RandomSurvivalForest
-from sksurv.metrics import concordance_index_censored
 from sksurv.util import Surv
-
+from collections import Counter
+from sklearn.utils import resample
+import shap
+from sklearn.model_selection import train_test_split
 warnings.filterwarnings("ignore", category=UserWarning)
 
-DATA_PATH = "../../data/processed/lendingclub_features_for_rf.parquet"
-FEATURE_PATH = "../../data/processed/features_final_list_rf.csv"
+DATA_PATH = "data/processed/lendingclub_features_for_rf.parquet"
+FEATURE_PATH = "data/processed/features_final_list_rf.csv"
 
 # --------------------------------------------------
 # 1) 데이터 로드 & 필터
@@ -142,32 +143,29 @@ print("✅ NA 기반 월별 hazard 추정 완료")
 # --------------------------------------------------
 # 5) Random Survival Forest 모델 학습 & 평가 (covid_exposure 그룹별)
 # --------------------------------------------------
-
 print("▶ 훈련 가능 데이터 현황:")
 print(f"- 총 행 수: {len(df)}")
 print(f"- issue_d ≥ 2019-05-01: {len(df[df['issue_d'] >= '2015-01-01'])}")
-print(f"- covid_exposure=0: {len(df[df['covid_exposure']==0])}")
-
-# Removed the original loop over "early" and "late" subgroups for model training and SHAP calculation
-
-from sklearn.utils import resample
-import shap
-
 print("\n🔍 전체 데이터 기반 SHAP 분석")
 print(f"X shape: {X.shape}, df[['T', 'E']] shape: {df[['T', 'E']].shape}")
+
 shap_runs = []
-from collections import Counter
+top_idx_list = []
+
 for i in range(10):  # bootstrap iterations
     X_bs, y_bs = resample(X, df[["T", "E"]], replace=True, random_state=42 + i)
     y_surv_bs = Surv.from_arrays(event=y_bs["E"].astype(bool), time=y_bs["T"])
-    rsf = RandomSurvivalForest(n_estimators=100, min_samples_split=10,
-                               min_samples_leaf=15, max_features="sqrt",
-                               n_jobs=-1, random_state=42 + i)
-    rsf.fit(X_bs, y_surv_bs)
+    rsf = RandomSurvivalForest(
+        n_estimators=100,
+        min_samples_split=10,
+        min_samples_leaf=15,
+        max_features="sqrt",
+        n_jobs=-1,
+        random_state=42 + i
+    )
+    rsf.fit(X_bs.values, y_surv_bs)
     print(f"✅ 부트스트랩 {i+1}/10 학습 완료")
     shap_runs.append(rsf.feature_importances_)
-    if i == 0:
-        top_idx_list = []
     top_idx = np.argsort(rsf.feature_importances_)[::-1][:5]
     top_idx_list.extend(top_idx)
 
@@ -175,20 +173,21 @@ top_5_idx = [item[0] for item in Counter(top_idx_list).most_common(5)]
 top_5_features = [features[i] for i in top_5_idx]
 print(f"🔝 전체 기준 Top 5 features:", top_5_features)
 
-rsf_final = RandomSurvivalForest(n_estimators=100, min_samples_split=10,
-                                 min_samples_leaf=15, max_features="sqrt",
-                                 n_jobs=-1, random_state=999)
 y_final = Surv.from_arrays(event=df["E"].astype(bool), time=df["T"])
-rsf_final.fit(X, y_final)
-print("✅ 최종 RSF 학습 완료")
+rsf_shap = RandomSurvivalForest(
+    n_estimators=30,
+    min_samples_split=10,
+    min_samples_leaf=15,
+    max_features="sqrt",
+    n_jobs=-1,
+    random_state=123
+)
+rsf_shap.fit(X[top_5_features].values, y_final)
+print("✅ 최종 SHAP용 RSF 학습 완료")
 
 
-    # Restrict X to top 5 features for SHAP computation
+# Restrict X to top 5 features for SHAP computation
 X_top5 = X[top_5_features].copy()
-
-# ▼▼▼ SHAP 계산 최적화를 위한 다운샘플링 (E 비율 유지) ▼▼▼
-from sklearn.model_selection import train_test_split
-
 X_top5["T"] = df["T"]
 X_top5["E"] = df["E"]
 
@@ -205,10 +204,9 @@ y_top5_sampled = Surv.from_arrays(
     time=X_top5_sampled["T"]
 )
 
-# Drop T, E from features for SHAP
 X_top5_sampled = X_top5_sampled.drop(columns=["T", "E"])
 
-explainer = shap.TreeExplainer(rsf_final)
+explainer = shap.TreeExplainer(rsf_shap)
 shap_values = explainer.shap_values(X_top5_sampled)
 print("✅ SHAP 계산 완료 (샘플 20,000건 기준)")
 
@@ -234,9 +232,9 @@ monthly_df = top_features_by_month["all"]
 plt.figure(figsize=(12, 6))
 for col in monthly_df.columns:
     sns.lineplot(data=monthly_df[col], label=col)
-plt.title(f"월별 SHAP 평균값 추이")
+plt.title(f"Monthly SHAP average")
 plt.xlabel("issue_month")
-plt.ylabel("평균 SHAP 값")
+plt.ylabel("Average SHAP value")
 plt.legend()
 plt.xticks(rotation=45)
 plt.tight_layout()
@@ -247,8 +245,8 @@ mean_abs = monthly_df.abs().sum()
 mean_abs = mean_abs / mean_abs.sum()  # Normalize to sum=1
 plt.figure(figsize=(6, 4))
 sns.barplot(x=mean_abs.values, y=mean_abs.index)
-plt.title(f"Top 5 변수 SHAP 비중")
-plt.xlabel("SHAP 비중")
-plt.ylabel("변수명")
+plt.title(f"Top 5 features SHAP importance")
+plt.xlabel("SHAP importance")
+plt.ylabel("feature")
 plt.tight_layout()
 plt.show()

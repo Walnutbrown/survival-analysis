@@ -4,7 +4,7 @@ def main():
     # 전처리된 feature 파일 불러오기
     # df = pd.read_csv('../../data/processed/lendingclub_features_for_lightgbm.csv')
     # df = pd.read_csv('../../data/processed/lendingclub_features_for_linear.csv')
-    df = pd.read_parquet('../../data/processed/lendingclub_features_for_rf.parquet')
+    df = pd.read_parquet('data/processed/lendingclub_features_for_rf.parquet')
 
     # 제외할 컬럼 리스트
     exclude_cols = [
@@ -72,7 +72,7 @@ def main():
 
     # 저장
     features_df = pd.DataFrame({'feature': feature_list})
-    features_df.to_csv('../../data/processed/features_final_list_rf.csv', index=False)
+    features_df.to_csv('data/processed/features_final_list_rf.csv', index=False)
 
     print(f"✅ features_final_list_rf.csv 생성 완료! ({len(feature_list)}개 변수)")
 
