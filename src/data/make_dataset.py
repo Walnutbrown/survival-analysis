@@ -29,7 +29,7 @@ def main():
     # 날짜형 변환 (Lending-Club 날짜 포맷: 'Dec-2015' → '%b-%Y')
     df['issue_d']      = pd.to_datetime(df['issue_d'], errors='coerce')
     df['last_pymnt_d'] = pd.to_datetime(df['last_pymnt_d'], errors='coerce')
-    df = df[df['issue_d']>='2019-01-01']
+    df = df[df['issue_d'] >= '2019-01-01']
     
     # 관측 종료 시점(obs_end) 설정: Current → cutoff, 그 외 → last_pymnt_d
     cutoff_date = pd.to_datetime('2020-12-31')

@@ -16,6 +16,7 @@ def main():
         'grade',
         'id',
         'initial_list_status',
+        'installment'
         'int_rate',
         'issue_d',
         'last_credit_pull_d',

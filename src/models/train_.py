@@ -9,6 +9,8 @@ from collections import Counter
 from sklearn.utils import resample
 import shap
 from sklearn.model_selection import train_test_split
+from sklearn.inspection import permutation_importance
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 DATA_PATH = "data/processed/lendingclub_features_for_rf.parquet"
@@ -65,11 +67,10 @@ df = df[df["T"] >= 0]
 # --------------------------------------------------
 features = pd.read_csv(FEATURE_PATH)["feature"].tolist()
 features = [f for f in features if f in df.columns]
-
-exclude_types = ["object", "datetime64[ns]"]
-features = [col for col in features if str(df[col].dtype) not in exclude_types]
+features = [f for f in features if f not in ["T", "E"] and str(df[f].dtype) not in ["object", "datetime64[ns]"]]
 
 X = df[features]
+
 
 # ▼▼▼ 추가 코드 ▼▼▼  
 print("▶ 데이터 분포 확인:")
@@ -154,7 +155,7 @@ top_idx_list = []
 
 for i in range(10):  # bootstrap iterations
     X_bs, y_bs = resample(X, df[["T", "E"]], replace=True, n_samples = 10000, random_state=42 + i)
-    y_surv_bs = Surv.from_arrays(event=y_bs["E"].astype(bool), time=y_bs["T"])
+    y_surv_bs = Surv.from_arrays(event=y_bs["E"].astype(bool).values, time=y_bs["T"].values)
     rsf = RandomSurvivalForest(
         n_estimators=50,
         min_samples_split=20,
@@ -165,15 +166,24 @@ for i in range(10):  # bootstrap iterations
     )
     rsf.fit(X_bs.values, y_surv_bs)
     print(f"✅ 부트스트랩 {i+1}/10 학습 완료")
-    shap_runs.append(rsf.feature_importances_)
-    top_idx = np.argsort(rsf.feature_importances_)[::-1][:5]
+
+    result = permutation_importance(
+        rsf,
+        X_bs.values,
+        y_surv_bs,
+        n_repeats=10,
+        random_state=42 + i,
+        n_jobs=-1
+    )
+    shap_runs.append(result.importances_mean)
+    top_idx = np.argsort(result.importances_mean)[::-1][:5]
     top_idx_list.extend(top_idx)
 
 top_5_idx = [item[0] for item in Counter(top_idx_list).most_common(5)]
 top_5_features = [features[i] for i in top_5_idx]
 print(f"🔝 전체 기준 Top 5 features:", top_5_features)
 
-y_final = Surv.from_arrays(event=df["E"].astype(bool), time=df["T"])
+y_final = Surv.from_arrays(event=df["E"].astype(bool).values, time=df["T"].values)
 rsf_shap = RandomSurvivalForest(
     n_estimators=30,
     min_samples_split=20,
@@ -194,7 +204,7 @@ X_top5["E"] = df["E"]
 # Stratified downsampling to 20,000 rows maintaining event proportion
 X_top5_sampled, _ = train_test_split(
     X_top5,
-    train_size=20000,
+    train_size=10000,
     stratify=X_top5["E"],
     random_state=999
 )
@@ -206,13 +216,30 @@ y_top5_sampled = Surv.from_arrays(
 
 X_top5_sampled = X_top5_sampled.drop(columns=["T", "E"])
 
-explainer = shap.TreeExplainer(rsf_shap)
-shap_values = explainer.shap_values(X_top5_sampled)
+explainer = shap.Explainer(rsf_shap.predict, X_top5_sampled, algorithm="permutation", max_evals=500)
+shap_values = explainer(X_top5_sampled)
 print("✅ SHAP 계산 완료 (샘플 20,000건 기준)")
+shap_exp = shap.Explanation(
+    values=shap_values.values if isinstance(shap_values, shap.Explanation) else shap_values,
+    data=X_top5_sampled.values,
+    feature_names=top_5_features
+)
+# SHAP 값 구조 확인 및 변환
+shap_data = shap_exp.values
+if shap_data.ndim != 2:
+    shap_data = shap_data.reshape(-1, len(top_5_features))
+# 차원 검증
+assert shap_data.shape[1] == len(top_5_features), \
+    f"차원 불일치: {shap_data.shape[1]} != {len(top_5_features)}"
 
-df["issue_month"] = df["issue_d"].dt.to_period("M")
-shap_df = pd.DataFrame(shap_values, columns=top_5_features)
-shap_df["issue_month"] = df["issue_month"].values
+# 4. DataFrame 생성
+shap_df = pd.DataFrame(
+    data=shap_data,
+    columns=top_5_features,
+    index=X_top5_sampled.index
+).join(df[['issue_month']], how='left')
+
+# 5. 월별 평균 계산
 mean_by_month = shap_df.groupby("issue_month")[top_5_features].mean()
 print("✅ 월별 SHAP 평균값 계산 완료")
 top_features_by_month = {"all": mean_by_month}
@@ -222,8 +249,6 @@ top_features_by_month = {"all": mean_by_month}
 # --------------------------------------------------
 # 6) 테스트 성능
 # --------------------------------------------------
-# (Removed CoxPHFitter test performance and variable selection saving as per instructions)
-
 import matplotlib.pyplot as plt
 import seaborn as sns
 
