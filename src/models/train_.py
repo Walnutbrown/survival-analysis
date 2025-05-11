@@ -153,12 +153,12 @@ shap_runs = []
 top_idx_list = []
 
 for i in range(10):  # bootstrap iterations
-    X_bs, y_bs = resample(X, df[["T", "E"]], replace=True, random_state=42 + i)
+    X_bs, y_bs = resample(X, df[["T", "E"]], replace=True, n_samples = 10000, random_state=42 + i)
     y_surv_bs = Surv.from_arrays(event=y_bs["E"].astype(bool), time=y_bs["T"])
     rsf = RandomSurvivalForest(
-        n_estimators=100,
-        min_samples_split=10,
-        min_samples_leaf=15,
+        n_estimators=50,
+        min_samples_split=20,
+        min_samples_leaf=30,
         max_features="sqrt",
         n_jobs=-1,
         random_state=42 + i
@@ -176,8 +176,8 @@ print(f"🔝 전체 기준 Top 5 features:", top_5_features)
 y_final = Surv.from_arrays(event=df["E"].astype(bool), time=df["T"])
 rsf_shap = RandomSurvivalForest(
     n_estimators=30,
-    min_samples_split=10,
-    min_samples_leaf=15,
+    min_samples_split=20,
+    min_samples_leaf=30,
     max_features="sqrt",
     n_jobs=-1,
     random_state=123
