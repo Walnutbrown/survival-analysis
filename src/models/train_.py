@@ -2,19 +2,12 @@ import numpy as np
 import pandas as pd
 from lifelines import NelsonAalenFitter
 import warnings
-import pandas as pd
-from sksurv.ensemble import RandomSurvivalForest
-from sksurv.util import Surv
-from collections import Counter
-from sklearn.utils import resample
 import shap
-from sklearn.model_selection import train_test_split
-from sklearn.inspection import permutation_importance
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-DATA_PATH = "data/processed/lendingclub_features_for_rf.parquet"
-FEATURE_PATH = "data/processed/features_final_list_rf.csv"
+DATA_PATH = "../../data/processed/lendingclub_features_for_rf.parquet"
+FEATURE_PATH = "../../data/processed/features_final_list_rf.csv"
 
 # --------------------------------------------------
 # 1) 데이터 로드 & 필터
@@ -23,7 +16,7 @@ df = pd.read_parquet(DATA_PATH)
 df["issue_d"] = pd.to_datetime(df["issue_d"], errors="coerce")
 df["last_pymnt_d"] = pd.to_datetime(df["last_pymnt_d"], errors="coerce")
 
-# ▼▼▼ 추가 코드 ▼▼▼  
+# 결측항 제거  
 print(f"issue_d NaT 개수: {df['issue_d'].isna().sum()}")
 print(f"last_pymnt_d NaT 개수: {df['last_pymnt_d'].isna().sum()}")
 df = df[df['issue_d'].notna() & df['last_pymnt_d'].notna()]  # NaT 제거
@@ -142,136 +135,103 @@ plt.show()
 print("✅ NA 기반 월별 hazard 추정 완료")
 
 # --------------------------------------------------
-# 5) Random Survival Forest 모델 학습 & 평가 (covid_exposure 그룹별)
+# 5) XGBoost AFT 모델 학습 & SHAP 분석
 # --------------------------------------------------
-print("▶ 훈련 가능 데이터 현황:")
-print(f"- 총 행 수: {len(df)}")
-print(f"- issue_d ≥ 2019-05-01: {len(df[df['issue_d'] >= '2015-01-01'])}")
-print("\n🔍 전체 데이터 기반 SHAP 분석")
-print(f"X shape: {X.shape}, df[['T', 'E']] shape: {df[['T', 'E']].shape}")
-
-shap_runs = []
-top_idx_list = []
-
-for i in range(10):  # bootstrap iterations
-    X_bs, y_bs = resample(X, df[["T", "E"]], replace=True, n_samples = 10000, random_state=42 + i)
-    y_surv_bs = Surv.from_arrays(event=y_bs["E"].astype(bool).values, time=y_bs["T"].values)
-    rsf = RandomSurvivalForest(
-        n_estimators=50,
-        min_samples_split=20,
-        min_samples_leaf=30,
-        max_features="sqrt",
-        n_jobs=-1,
-        random_state=42 + i
-    )
-    rsf.fit(X_bs.values, y_surv_bs)
-    print(f"✅ 부트스트랩 {i+1}/10 학습 완료")
-
-    result = permutation_importance(
-        rsf,
-        X_bs.values,
-        y_surv_bs,
-        n_repeats=10,
-        random_state=42 + i,
-        n_jobs=-1
-    )
-    shap_runs.append(result.importances_mean)
-    top_idx = np.argsort(result.importances_mean)[::-1][:5]
-    top_idx_list.extend(top_idx)
-
-top_5_idx = [item[0] for item in Counter(top_idx_list).most_common(5)]
-top_5_features = [features[i] for i in top_5_idx]
-print(f"🔝 전체 기준 Top 5 features:", top_5_features)
-
-y_final = Surv.from_arrays(event=df["E"].astype(bool).values, time=df["T"].values)
-rsf_shap = RandomSurvivalForest(
-    n_estimators=30,
-    min_samples_split=20,
-    min_samples_leaf=30,
-    max_features="sqrt",
-    n_jobs=-1,
-    random_state=123
-)
-rsf_shap.fit(X[top_5_features].values, y_final)
-print("✅ 최종 SHAP용 RSF 학습 완료")
+import xgboost as xgb
 
 
-# Restrict X to top 5 features for SHAP computation
-X_top5 = X[top_5_features].copy()
-X_top5["T"] = df["T"]
-X_top5["E"] = df["E"]
+# AFT용 label 구성
+df_model = df.loc[X.index]
+y_lower = np.where(df_model["E"] == 1, df_model["T"], -np.inf)
+y_upper = df_model["T"]
 
-# Stratified downsampling to 20,000 rows maintaining event proportion
-X_top5_sampled, _ = train_test_split(
-    X_top5,
-    train_size=10000,
-    stratify=X_top5["E"],
-    random_state=999
+# DMatrix 구성
+dtrain = xgb.DMatrix(data=X, label=y_upper)
+dtrain.set_float_info("label_lower_bound", y_lower)
+dtrain.set_float_info("label_upper_bound", y_upper)
+
+params = {
+    "objective": "survival:aft",
+    "aft_loss_distribution": "normal",
+    "aft_loss_distribution_scale": 1.0,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "subsample": 0.8,
+    "colsample_bynode": 0.8,
+    "random_state": 42,
+    "nthread": -1,
+    "verbosity": 1
+}
+
+model = xgb.train(
+    params=params,
+    dtrain=dtrain,
+    num_boost_round=100
 )
 
-y_top5_sampled = Surv.from_arrays(
-    event=X_top5_sampled["E"].astype(bool),
-    time=X_top5_sampled["T"]
-)
+# SHAP 계산
+explainer = shap.TreeExplainer(model, data=X, feature_perturbation="interventional", approximate=True)
+shap_values = explainer.shap_values(X)
 
-X_top5_sampled = X_top5_sampled.drop(columns=["T", "E"])
-
-explainer = shap.Explainer(rsf_shap.predict, X_top5_sampled, algorithm="permutation", max_evals=500)
-shap_values = explainer(X_top5_sampled)
-print("✅ SHAP 계산 완료 (샘플 20,000건 기준)")
-shap_exp = shap.Explanation(
-    values=shap_values.values if isinstance(shap_values, shap.Explanation) else shap_values,
-    data=X_top5_sampled.values,
-    feature_names=top_5_features
-)
-# SHAP 값 구조 확인 및 변환
-shap_data = shap_exp.values
-if shap_data.ndim != 2:
-    shap_data = shap_data.reshape(-1, len(top_5_features))
-# 차원 검증
-assert shap_data.shape[1] == len(top_5_features), \
-    f"차원 불일치: {shap_data.shape[1]} != {len(top_5_features)}"
-
-# 4. DataFrame 생성
-shap_df = pd.DataFrame(
-    data=shap_data,
-    columns=top_5_features,
-    index=X_top5_sampled.index
-).join(df[['issue_month']], how='left')
-
-# 5. 월별 평균 계산
-mean_by_month = shap_df.groupby("issue_month")[top_5_features].mean()
-print("✅ 월별 SHAP 평균값 계산 완료")
-top_features_by_month = {"all": mean_by_month}
-
-# 저장 또는 시각화용 결과 준비됨
+# 월별 평균 SHAP 계산
+X["issue_month"] = df["issue_d"].dt.to_period("M")
+shap_df = pd.DataFrame(shap_values, columns=features)
+shap_df["issue_month"] = X["issue_month"]
+monthly_shap = shap_df.groupby("issue_month")[features].mean()
+print("✅ XGBoost AFT 기반 월별 SHAP 계산 완료")
 
 # --------------------------------------------------
 # 6) 테스트 성능
 # --------------------------------------------------
+
+# ✅ 6-1. Concordance Index 계산
+from lifelines.utils import concordance_index
+
+c_index = concordance_index(y_test["T"], -model.predict(xgb.DMatrix(X_test)), y_test["E"])
+print(f"Concordance Index (C-index): {c_index:.4f}")
+
+# ✅ 6-2. Integrated Brier Score 계산 (scikit-survival 필요)
+from sksurv.metrics import integrated_brier_score
+from sksurv.util import Surv
+
+# (1) scikit-survival 형식으로 데이터 변환
+y_train_sksurv = Surv.from_arrays(event=y_train["E"].astype(bool), time=y_train["T"])
+y_test_sksurv  = Surv.from_arrays(event=y_test["E"].astype(bool), time=y_test["T"])
+
+# (2) AFT 모델의 예측값 사용
+predicted = model.predict(xgb.DMatrix(X_test))
+
+# (3) IBS 계산 (예: 테스트 기간 내 분위수 기반 시점 설정)
+times = np.percentile(y_test["T"], np.linspace(10, 90, 50))
+ibs = integrated_brier_score(y_train_sksurv, y_test_sksurv, predicted, times)
+print(f"Integrated Brier Score (IBS): {ibs:.4f}")
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# 시각화: 월별 top feature들의 SHAP 평균값 추이
-monthly_df = top_features_by_month["all"]
+# 시각화: 각 그룹에서 top feature들의 SHAP 총합 비중 (비율 기반 중요도)
+monthly_df = monthly_shap
+mean_abs = monthly_df.abs().sum()
+mean_abs = mean_abs / mean_abs.sum()  # Normalize to sum=1
+top10 = mean_abs.sort_values(ascending=False).head(10)
+
+# SHAP 중요도 바 플롯
+plt.figure(figsize=(6, 4))
+sns.barplot(x=top10.values, y=top10.index)
+plt.title(f"Top 10 features SHAP importance")
+plt.xlabel("SHAP importance")
+plt.ylabel("feature")
+plt.tight_layout()
+plt.show()
+
+# 시각화: Top 10 feature들의 월별 SHAP 평균값 추이
 plt.figure(figsize=(12, 6))
-for col in monthly_df.columns:
-    sns.lineplot(data=monthly_df[col], label=col)
-plt.title(f"Monthly SHAP average")
+for col in top10.index:
+    sns.lineplot(x=monthly_df.index.astype(str), y=monthly_df[col], label=col)
+plt.title(f"Monthly SHAP average for Top 10 features")
 plt.xlabel("issue_month")
 plt.ylabel("Average SHAP value")
 plt.legend()
 plt.xticks(rotation=45)
-plt.tight_layout()
-plt.show()
-
-# 시각화: 각 그룹에서 top feature들의 SHAP 총합 비중 (비율 기반 중요도)
-mean_abs = monthly_df.abs().sum()
-mean_abs = mean_abs / mean_abs.sum()  # Normalize to sum=1
-plt.figure(figsize=(6, 4))
-sns.barplot(x=mean_abs.values, y=mean_abs.index)
-plt.title(f"Top 5 features SHAP importance")
-plt.xlabel("SHAP importance")
-plt.ylabel("feature")
 plt.tight_layout()
 plt.show()

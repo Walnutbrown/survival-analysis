@@ -1,10 +1,9 @@
 from pathlib import Path
 import pandas as pd
-import numpy as np
 
 def main():
     # 1) 파일 읽기
-    df = pd.read_csv('data/raw/lendingclub.csv', low_memory = False) 
+    df = pd.read_csv('../../data/raw/lendingclub.csv', low_memory = False) 
     print(df.head(3))
    
     
@@ -42,7 +41,7 @@ def main():
     print(f"전처리 후 데이터 크기: {df.shape}")
 
     # 3) inim 폴더에 저장
-    out_path = Path('data/interim/lendingclub_survival.csv')
+    out_path = Path('../../data/interim/lendingclub_survival.csv')
     out_path.parent.mkdir(parents = True, exist_ok = True)
     df.to_csv(out_path, index = False)
     print(f"✅ 저장 완료: {out_path}")

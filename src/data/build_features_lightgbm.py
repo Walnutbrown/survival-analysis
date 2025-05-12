@@ -4,7 +4,7 @@ import numpy as np
 
 def main():
     # 1) interim 데이터 불러오기
-    df = pd.read_csv('data/interim/lendingclub_survival.csv')
+    df = pd.read_csv('../../data/interim/lendingclub_survival.csv')
 
     # 2) 숫자형으로 변환해야 하는 컬럼 먼저 처리
     df['term'] = df['term'].str.extract(r'(\d+)').astype(float)
@@ -100,7 +100,7 @@ def main():
     # 6) 저장
     if 'id' in df.columns:
         df.drop(columns=['id'], inplace=True)
-    df.to_parquet('data/processed/lendingclub_features_for_rf.parquet', index=False, engine='pyarrow')
+    df.to_parquet('../../data/processed/lendingclub_features_for_rf.parquet', index=False, engine='pyarrow')
     print('✅ 파일 저장 완료')
     
 if __name__ == "__main__":
