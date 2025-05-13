@@ -115,25 +115,28 @@ monthly_hazards = {}
 monthly_events = {}
 monthly_ci = {}
 
-for month, group_df in df.groupby("issue_month"):
-    if len(group_df) < 100:
+unique_months = sorted(df["issue_month"].unique())
+
+for month in unique_months:
+    df_window = df[df["issue_month"] <= month]
+    if df_window.shape[0] < 100:
         continue
     try:
-        naf.fit(group_df["T"], event_observed=group_df["E"])
+        naf.fit(df_window["T"], event_observed=df_window["E"])
         cum_hazard = naf.cumulative_hazard_
         inst_hazard = cum_hazard.diff().fillna(0)
         monthly_hazards[str(month)] = inst_hazard.mean().values[0]
 
-        # 추가 기능 1: 월별 부도 사건 수 저장
-        monthly_events[str(month)] = int(group_df["E"].sum())
+        # 월별 부도 사건 수 저장 (누적 기준)
+        monthly_events[str(month)] = int(df_window["E"].sum())
 
-        # 추가 기능 2: 신뢰구간 저장 (마지막 시점 기준)
+        # 신뢰구간 저장 (마지막 시점 기준)
         ci_df = naf.confidence_interval_
         if not ci_df.empty:
             last_ci = ci_df.iloc[-1]
             monthly_ci[str(month)] = (last_ci[0], last_ci[1])
     except Exception as e:
-        print(f"⚠️ {month} 월 hazard 계산 오류: {e}")
+        print(f"⚠️ {month} 누적 hazard 계산 오류: {e}")
         continue
 
 # hazard 평균값 시계열 시각화
@@ -157,6 +160,7 @@ print("✅ NA 기반 월별 hazard 추정 완료")
 window_results = {}
 shap_top_records = []
 monthly_shap_dynamic = []
+monthly_shap_dynamic_std = []
 month_labels = []
 
 unique_months = sorted(df["issue_month"].unique())
@@ -207,24 +211,32 @@ for month in unique_months:
     shap_values_window = explainer_window.shap_values(shap_input)
     shap_df_window = pd.DataFrame(shap_values_window, columns=features)
     monthly_shap_dynamic.append(shap_df_window.mean())
-    # 월별 SHAP 평균값 저장 (wide-form)
-    monthly_shap_dynamic.append(shap_df_window.mean())
+    monthly_shap_dynamic_std.append(shap_df_window.std())
     month_labels.append(str(month))
 
     # 월별 SHAP 상위 10개 저장 (long-form)
     top_features = shap_df_window.abs().mean().sort_values(ascending=False).head(10)
+    shap_std_window = shap_df_window.std()
     for feature, value in top_features.items():
         shap_top_records.append({
             "issue_month": str(month),
             "feature": feature,
-            "mean_abs_shap": value
+            "mean_abs_shap": value,
+            "shap_std": shap_std_window[feature]
         })
 
 # 결과 저장
-monthly_shap_df = pd.DataFrame(monthly_shap_dynamic, index=month_labels)
+valid_len = min(len(monthly_shap_dynamic), len(month_labels))
+monthly_shap_df = pd.DataFrame(monthly_shap_dynamic[:valid_len], index=month_labels[:valid_len])
 monthly_shap_df.index.name = "issue_month"
 monthly_shap_df.to_csv("../../reports/monthly_shap_dynamic.csv")
 print("📁 월별 누적 SHAP 평균값 저장 완료: monthly_shap_dynamic.csv")
+
+valid_len_std = min(len(monthly_shap_dynamic_std), len(month_labels))
+monthly_shap_std_df = pd.DataFrame(monthly_shap_dynamic_std[:valid_len_std], index=month_labels[:valid_len_std])
+monthly_shap_std_df.index.name = "issue_month"
+monthly_shap_std_df.to_csv("../../reports/monthly_shap_dynamic_std.csv")
+print("📁 월별 누적 SHAP 표준편차 저장 완료: monthly_shap_dynamic_std.csv")
 
 shap_top_df = pd.DataFrame(shap_top_records)
 shap_top_df.to_csv("../../reports/monthly_top10_shap_longform.csv", index=False)
@@ -237,11 +249,11 @@ print("📁 월별 SHAP 상위 10개 변수 저장 완료: monthly_top10_shap_lo
 from scipy.stats import pearsonr
 
 # 전체 SHAP 중요도 기준 상위 3개 변수 선택
-global_mean_abs = shap_df[features].abs().mean()
+global_mean_abs = monthly_shap_df.abs().mean()
 top3_features = global_mean_abs.sort_values(ascending=False).head(3).index.tolist()
 
 # 해당 변수들의 월별 평균값 합계 (monthly_shap 기준)
-monthly_shap_top3_sum = monthly_shap[top3_features].sum(axis=1)
+monthly_shap_top3_sum = monthly_shap_df[top3_features].sum(axis=1)
 
 # 공통 월만 사용하여 monthly_hazards와 정렬
 common_months = monthly_shap_top3_sum.index.intersection(pd.PeriodIndex(monthly_hazards.keys(), freq="M"))
@@ -252,8 +264,11 @@ aligned_hazard = hazard_series[common_months]
 aligned_shap = monthly_shap_top3_sum[common_months]
 
 # 상관계수 계산
-r, p = pearsonr(aligned_hazard.values, aligned_shap.values)
-print(f"📊 Nelson-Aalen hazard와 SHAP Top-3 합계의 Pearson 상관계수: r = {r:.3f}, p = {p:.3f}")
+if len(aligned_hazard) >= 2 and len(aligned_shap) >= 2:
+    r, p = pearsonr(aligned_hazard.values, aligned_shap.values)
+    print(f"📊 Nelson-Aalen hazard와 SHAP Top-3 합계의 Pearson 상관계수: r = {r:.3f}, p = {p:.3f}")
+else:
+    print("⚠️ 상관계수 계산 불가: 공통 월 개수가 2개 미만입니다.")
 
 # --------------------------------------------------
 # 6) 월별 누적 모델 기반 C-index 및 IBS 저장
