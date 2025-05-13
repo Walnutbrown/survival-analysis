@@ -66,8 +66,7 @@ features = [f for f in features if f not in ["T", "E"] and str(df[f].dtype) not 
 df["issue_month"] = df["issue_d"].dt.to_period("M")
 df["issue_month_encoded"] = df["issue_month"].astype("category").cat.codes
 
-# issue_month_encoded를 features에 추가
-features.append("issue_month_encoded")
+## features.append("issue_month_encoded")  # 제거: 실험 목적상 issue_month_encoded를 feature에서 제외
 
 X = df[features]
 
@@ -197,6 +196,83 @@ shap_df = pd.DataFrame(shap_values, columns=features)
 shap_df["issue_month"] = X["issue_month"]
 monthly_shap = shap_df.groupby("issue_month")[features].mean()
 print("✅ XGBoost AFT 기반 월별 SHAP 계산 완료")
+
+# --------------------------------------------------
+# 5-2) 월별 실시간 위험 추정 (슬라이딩 윈도우 기반)
+# --------------------------------------------------
+
+window_results = {}
+unique_months = sorted(df["issue_month"].unique())
+
+for month in unique_months:
+    # 해당 월까지의 데이터를 누적하여 학습
+    df_window = df[df["issue_month"] <= month]
+    if df_window.shape[0] < 300:  # 최소 샘플 수 확보
+        continue
+
+    # 특징 행렬 및 타깃 구성
+    X_window = df_window[features]
+    y_window = df_window[["T", "E"]]
+    y_lower = np.where(y_window["E"] == 1, y_window["T"], -np.inf)
+    y_upper = y_window["T"]
+
+    # DMatrix 구성
+    dtrain_window = xgb.DMatrix(data=X_window, label=y_upper)
+    dtrain_window.set_float_info("label_lower_bound", y_lower)
+    dtrain_window.set_float_info("label_upper_bound", y_upper)
+
+    # 모델 훈련
+    model_window = xgb.train(
+        params=params,
+        dtrain=dtrain_window,
+        num_boost_round=100
+    )
+
+    # 해당 월 데이터만으로 평균 예측 생존시간 계산
+    df_target = df[df["issue_month"] == month]
+    if df_target.shape[0] < 50:
+        continue
+    X_target = df_target[features]
+    pred = model_window.predict(xgb.DMatrix(X_target))
+
+    # 평균 생존시간을 반비례 위험 지표로 저장
+    window_results[str(month)] = 1 / np.mean(pred)
+
+    # SHAP 계산 및 저장
+    explainer_window = shap.TreeExplainer(model_window, data=X_target, feature_perturbation="interventional", approximate=True)
+    shap_values_window = explainer_window.shap_values(X_target)
+    shap_df_window = pd.DataFrame(shap_values_window, columns=features)
+    shap_df_window["issue_month"] = str(month)
+    if "monthly_shap_dynamic" not in locals():
+        monthly_shap_dynamic = []
+    monthly_shap_dynamic.append(shap_df_window.mean(numeric_only=True))
+
+# 실시간 위험 추이 시각화
+plt.figure(figsize=(12, 5))
+plt.plot(window_results.keys(), window_results.values(), marker="o", label="Estimated real-time hazard (1/mean T)")
+plt.title("Real-time Hazard Estimation Over Observation Month")
+plt.xlabel("Observation month")
+plt.ylabel("Estimated Hazard (1 / mean predicted T)")
+plt.xticks(rotation=45)
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# SHAP 월별 평균값 동적 계산 결과 통합
+monthly_shap_dynamic_df = pd.DataFrame(monthly_shap_dynamic)
+monthly_shap_dynamic_df["issue_month"] = list(window_results.keys())
+monthly_shap_dynamic_df.set_index("issue_month", inplace=True)
+monthly_shap_dynamic_df.to_csv("../../results/monthly_shap_dynamic.csv")
+print("📁 월별 누적 SHAP 계산 결과 저장 완료: monthly_shap_dynamic.csv")
+
+# 결과 저장: 실시간 위험 추정 결과를 CSV로 저장
+window_df = pd.DataFrame({
+    "issue_month": list(window_results.keys()),
+    "estimated_hazard": list(window_results.values())
+})
+window_df.to_csv("../../results/real_time_hazard_by_month.csv", index=False)
+print("📁 실시간 위험 추정 결과 저장 완료: real_time_hazard_by_month.csv")
 
 # --------------------------------------------------
 # 5-1) Nelson-Aalen hazard와 SHAP 기반 변수 기여도의 상관성 분석
