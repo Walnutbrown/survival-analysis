@@ -211,7 +211,7 @@ for month in unique_months:
 
     params = {
         "objective": "survival:aft",
-        "aft_loss_distribution": "normal",
+        "aft_loss_distribution": "logistic",
         "aft_loss_distribution_scale": 1.0,
         "learning_rate": 0.05,
         "max_depth": 4,
@@ -280,9 +280,9 @@ top3_features = global_mean_abs.sort_values(ascending=False).head(3).index.tolis
 # 해당 변수들의 월별 평균값 합계 (monthly_shap 기준)
 monthly_shap_top3_sum = monthly_shap_df[top3_features].sum(axis=1)
 
-# 공통 월만 사용하여 monthly_hazards와 정렬
-common_months = monthly_shap_top3_sum.index.intersection(pd.PeriodIndex(monthly_hazards.keys(), freq="M"))
-hazard_series = pd.Series(monthly_hazards).astype(float)
+# 공통 월만 사용하여 na_obs_hazard와 정렬
+common_months = monthly_shap_top3_sum.index.intersection(pd.PeriodIndex(na_obs_hazard.keys(), freq="M"))
+hazard_series = pd.Series(na_obs_hazard).astype(float)
 hazard_series.index = pd.PeriodIndex(hazard_series.index, freq="M")
 
 aligned_hazard = hazard_series[common_months]
@@ -343,7 +343,7 @@ for i, month in enumerate(month_labels):
     dtrain_window.set_float_info("label_upper_bound", y_upper)
     params = {
         "objective": "survival:aft",
-        "aft_loss_distribution": "normal",
+        "aft_loss_distribution": "logistic",
         "aft_loss_distribution_scale": 1.0,
         "learning_rate": 0.05,
         "max_depth": 4,
