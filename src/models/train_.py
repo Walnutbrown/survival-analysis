@@ -62,6 +62,13 @@ features = pd.read_csv(FEATURE_PATH)["feature"].tolist()
 features = [f for f in features if f in df.columns]
 features = [f for f in features if f not in ["T", "E"] and str(df[f].dtype) not in ["object", "datetime64[ns]"]]
 
+# issue_month 인코딩: XGBoost 학습을 위한 시간 변수 추가
+df["issue_month"] = df["issue_d"].dt.to_period("M")
+df["issue_month_encoded"] = df["issue_month"].astype("category").cat.codes
+
+# issue_month_encoded를 features에 추가
+features.append("issue_month_encoded")
+
 X = df[features]
 
 
@@ -184,7 +191,8 @@ explainer = shap.TreeExplainer(model, data=X, feature_perturbation="intervention
 shap_values = explainer.shap_values(X)
 
 # 월별 평균 SHAP 계산
-X["issue_month"] = df["issue_d"].dt.to_period("M")
+# X["issue_month"] = df["issue_d"].dt.to_period("M")
+X["issue_month"] = df["issue_month"]  # 이미 위에서 생성된 컬럼 사용
 shap_df = pd.DataFrame(shap_values, columns=features)
 shap_df["issue_month"] = X["issue_month"]
 monthly_shap = shap_df.groupby("issue_month")[features].mean()
@@ -233,14 +241,21 @@ from sksurv.util import Surv
 y_train_sksurv = Surv.from_arrays(event=y_train["E"].astype(bool), time=y_train["T"])
 y_test_sksurv  = Surv.from_arrays(event=y_test["E"].astype(bool), time=y_test["T"])
 
-# (2) AFT 모델의 예측값 사용
-predicted = model.predict(xgb.DMatrix(X_test))
+from scipy.stats import norm
 
- # (3) IBS 계산 (예: 테스트 기간 내 분위수 기반 시점 설정)
+predicted = model.predict(xgb.DMatrix(X_test))  # AFT 예측값 (중앙 생존시간)
+sigma = params["aft_loss_distribution_scale"]
+
+# IBS 계산을 위한 생존확률 행렬 추정 (log-normal 가정 기반)
 t_min = y_test["T"].min()
 t_max = y_test["T"].max()
 times = np.linspace(t_min, t_max * 0.999, 50)
-ibs = integrated_brier_score(y_train_sksurv, y_test_sksurv, predicted, times)
+
+estimate = np.zeros((len(predicted), len(times)))
+for i, t in enumerate(times):
+    estimate[:, i] = 1 - norm.cdf(np.log(t), loc=np.log(predicted), scale=sigma)
+
+ibs = integrated_brier_score(y_train_sksurv, y_test_sksurv, estimate, times)
 print(f"Integrated Brier Score (IBS): {ibs:.4f}")
 
 import matplotlib.pyplot as plt
