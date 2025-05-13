@@ -151,65 +151,23 @@ plt.show()
 print("✅ NA 기반 월별 hazard 추정 완료")
 
 # --------------------------------------------------
-# 5) XGBoost AFT 모델 학습 & SHAP 분석
-# --------------------------------------------------
-import xgboost as xgb
-
-
-# AFT용 label 구성
-df_model = df.loc[X.index]
-y_lower = np.where(df_model["E"] == 1, df_model["T"], -np.inf)
-y_upper = df_model["T"]
-
-# DMatrix 구성
-dtrain = xgb.DMatrix(data=X, label=y_upper)
-dtrain.set_float_info("label_lower_bound", y_lower)
-dtrain.set_float_info("label_upper_bound", y_upper)
-
-params = {
-    "objective": "survival:aft",
-    "aft_loss_distribution": "normal",
-    "aft_loss_distribution_scale": 1.0,
-    "learning_rate": 0.05,
-    "max_depth": 4,
-    "subsample": 0.8,
-    "colsample_bynode": 0.8,
-    "random_state": 42,
-    "nthread": -1,
-    "verbosity": 1
-}
-
-model = xgb.train(
-    params=params,
-    dtrain=dtrain,
-    num_boost_round=100
-)
-
-# SHAP 계산
-explainer = shap.TreeExplainer(model, data=X, feature_perturbation="interventional", approximate=True)
-shap_values = explainer.shap_values(X)
-
-# 월별 평균 SHAP 계산
-# X["issue_month"] = df["issue_d"].dt.to_period("M")
-X["issue_month"] = df["issue_month"]  # 이미 위에서 생성된 컬럼 사용
-shap_df = pd.DataFrame(shap_values, columns=features)
-shap_df["issue_month"] = X["issue_month"]
-monthly_shap = shap_df.groupby("issue_month")[features].mean()
-print("✅ XGBoost AFT 기반 월별 SHAP 계산 완료")
-
-# --------------------------------------------------
-# 5-2) 월별 실시간 위험 추정 (슬라이딩 윈도우 기반)
+# 5-2) 월별 누적 SHAP 분석 및 위험 추정 저장
 # --------------------------------------------------
 
 window_results = {}
+shap_top_records = []
+monthly_shap_dynamic = []
+month_labels = []
+
 unique_months = sorted(df["issue_month"].unique())
 
 for month in unique_months:
-    # 해당 월까지의 데이터를 누적하여 학습
+    # 누적 학습 데이터 생성
     df_window = df[df["issue_month"] <= month]
-    if df_window.shape[0] < 300:  # 최소 샘플 수 확보
+    if df_window.shape[0] < 300:
         continue
-
+    if df_window.shape[0] > 200000:
+        df_window = df_window.sample(n=20000, random_state=42)
     # 특징 행렬 및 타깃 구성
     X_window = df_window[features]
     y_window = df_window[["T", "E"]]
@@ -217,62 +175,60 @@ for month in unique_months:
     y_upper = y_window["T"]
 
     # DMatrix 구성
+    import xgboost as xgb
     dtrain_window = xgb.DMatrix(data=X_window, label=y_upper)
     dtrain_window.set_float_info("label_lower_bound", y_lower)
     dtrain_window.set_float_info("label_upper_bound", y_upper)
 
-    # 모델 훈련
+    params = {
+        "objective": "survival:aft",
+        "aft_loss_distribution": "normal",
+        "aft_loss_distribution_scale": 1.0,
+        "learning_rate": 0.05,
+        "max_depth": 4,
+        "subsample": 0.8,
+        "colsample_bynode": 0.8,
+        "random_state": 42,
+        "nthread": -1,
+        "verbosity": 1
+    }
+
+    # 모델 학습
     model_window = xgb.train(
         params=params,
         dtrain=dtrain_window,
         num_boost_round=100
     )
 
-    # 해당 월 데이터만으로 평균 예측 생존시간 계산
-    df_target = df[df["issue_month"] == month]
-    if df_target.shape[0] < 50:
-        continue
-    X_target = df_target[features]
-    pred = model_window.predict(xgb.DMatrix(X_target))
-
-    # 평균 생존시간을 반비례 위험 지표로 저장
-    window_results[str(month)] = 1 / np.mean(pred)
-
-    # SHAP 계산 및 저장
-    explainer_window = shap.TreeExplainer(model_window, data=X_target, feature_perturbation="interventional", approximate=True)
-    shap_values_window = explainer_window.shap_values(X_target)
+    # SHAP 계산 (학습에 사용된 누적 데이터 전체에 대해)
+    shap_input = X_window.sample(n=min(20000, len(X_window)), random_state=42)
+    import shap
+    explainer_window = shap.TreeExplainer(model_window, data=shap_input, feature_perturbation="interventional", approximate=True)
+    shap_values_window = explainer_window.shap_values(shap_input)
     shap_df_window = pd.DataFrame(shap_values_window, columns=features)
-    shap_df_window["issue_month"] = str(month)
-    if "monthly_shap_dynamic" not in locals():
-        monthly_shap_dynamic = []
-    monthly_shap_dynamic.append(shap_df_window.mean(numeric_only=True))
+    monthly_shap_dynamic.append(shap_df_window.mean())
+    # 월별 SHAP 평균값 저장 (wide-form)
+    monthly_shap_dynamic.append(shap_df_window.mean())
+    month_labels.append(str(month))
 
-# 실시간 위험 추이 시각화
-plt.figure(figsize=(12, 5))
-plt.plot(window_results.keys(), window_results.values(), marker="o", label="Estimated real-time hazard (1/mean T)")
-plt.title("Real-time Hazard Estimation Over Observation Month")
-plt.xlabel("Observation month")
-plt.ylabel("Estimated Hazard (1 / mean predicted T)")
-plt.xticks(rotation=45)
-plt.grid(True)
-plt.legend()
-plt.tight_layout()
-plt.show()
+    # 월별 SHAP 상위 10개 저장 (long-form)
+    top_features = shap_df_window.abs().mean().sort_values(ascending=False).head(10)
+    for feature, value in top_features.items():
+        shap_top_records.append({
+            "issue_month": str(month),
+            "feature": feature,
+            "mean_abs_shap": value
+        })
 
-# SHAP 월별 평균값 동적 계산 결과 통합
-monthly_shap_dynamic_df = pd.DataFrame(monthly_shap_dynamic)
-monthly_shap_dynamic_df["issue_month"] = list(window_results.keys())
-monthly_shap_dynamic_df.set_index("issue_month", inplace=True)
-monthly_shap_dynamic_df.to_csv("../../results/monthly_shap_dynamic.csv")
-print("📁 월별 누적 SHAP 계산 결과 저장 완료: monthly_shap_dynamic.csv")
+# 결과 저장
+monthly_shap_df = pd.DataFrame(monthly_shap_dynamic, index=month_labels)
+monthly_shap_df.index.name = "issue_month"
+monthly_shap_df.to_csv("../../reports/monthly_shap_dynamic.csv")
+print("📁 월별 누적 SHAP 평균값 저장 완료: monthly_shap_dynamic.csv")
 
-# 결과 저장: 실시간 위험 추정 결과를 CSV로 저장
-window_df = pd.DataFrame({
-    "issue_month": list(window_results.keys()),
-    "estimated_hazard": list(window_results.values())
-})
-window_df.to_csv("../../results/real_time_hazard_by_month.csv", index=False)
-print("📁 실시간 위험 추정 결과 저장 완료: real_time_hazard_by_month.csv")
+shap_top_df = pd.DataFrame(shap_top_records)
+shap_top_df.to_csv("../../reports/monthly_top10_shap_longform.csv", index=False)
+print("📁 월별 SHAP 상위 10개 변수 저장 완료: monthly_top10_shap_longform.csv")
 
 # --------------------------------------------------
 # 5-1) Nelson-Aalen hazard와 SHAP 기반 변수 기여도의 상관성 분석
@@ -300,66 +256,85 @@ r, p = pearsonr(aligned_hazard.values, aligned_shap.values)
 print(f"📊 Nelson-Aalen hazard와 SHAP Top-3 합계의 Pearson 상관계수: r = {r:.3f}, p = {p:.3f}")
 
 # --------------------------------------------------
-# 6) 테스트 성능
+# 6) 월별 누적 모델 기반 C-index 및 IBS 저장
 # --------------------------------------------------
 
-# ✅ 6-1. Concordance Index 계산
 from lifelines.utils import concordance_index
-
-c_index = concordance_index(y_test["T"], -model.predict(xgb.DMatrix(X_test)), y_test["E"])
-print(f"Concordance Index (C-index): {c_index:.4f}")
-
-# ✅ 6-2. Integrated Brier Score 계산 (scikit-survival 필요)
 from sksurv.metrics import integrated_brier_score
 from sksurv.util import Surv
-
-# (1) scikit-survival 형식으로 데이터 변환
-y_train_sksurv = Surv.from_arrays(event=y_train["E"].astype(bool), time=y_train["T"])
-y_test_sksurv  = Surv.from_arrays(event=y_test["E"].astype(bool), time=y_test["T"])
-
 from scipy.stats import norm
+import xgboost as xgb
+import numpy as np
+import pandas as pd
 
-predicted = model.predict(xgb.DMatrix(X_test))  # AFT 예측값 (중앙 생존시간)
-sigma = params["aft_loss_distribution_scale"]
+cindex_records = []
+ibs_records = []
 
-# IBS 계산을 위한 생존확률 행렬 추정 (log-normal 가정 기반)
-t_min = y_test["T"].min()
-t_max = y_test["T"].max()
-times = np.linspace(t_min, t_max * 0.999, 50)
+for i, month in enumerate(month_labels):
+    df_window = df[df["issue_month"] <= month]
+    if df_window.shape[0] < 300:
+        continue
 
-estimate = np.zeros((len(predicted), len(times)))
-for i, t in enumerate(times):
-    estimate[:, i] = 1 - norm.cdf(np.log(t), loc=np.log(predicted), scale=sigma)
+    X_window = df_window[features]
+    y_window = df_window[["T", "E"]]
 
-ibs = integrated_brier_score(y_train_sksurv, y_test_sksurv, estimate, times)
-print(f"Integrated Brier Score (IBS): {ibs:.4f}")
+    X_window = X_window.copy()
+    y_window = y_window.copy()
 
-import matplotlib.pyplot as plt
-import seaborn as sns
+    # C-index
+    cidx = concordance_index(
+        y_window["T"], 
+        -monthly_shap_dynamic[i].values @ X_window[monthly_shap_dynamic[i].index].T.values,  # linear SHAP proxy score
+        y_window["E"]
+    )
+    cindex_records.append({"issue_month": month, "c_index": cidx})
 
-# 시각화: 각 그룹에서 top feature들의 SHAP 총합 비중 (비율 기반 중요도)
-monthly_df = monthly_shap
-mean_abs = monthly_df.abs().sum()
-mean_abs = mean_abs / mean_abs.sum()  # Normalize to sum=1
-top10 = mean_abs.sort_values(ascending=False).head(10)
+    # IBS (생존확률 기반)
+    y_sksurv = Surv.from_arrays(event=y_window["E"].astype(bool), time=y_window["T"])
+    # Use the model from last training iteration for prediction
+    # For this, we need to re-train or store model_window from above; assuming model_window is last trained model
+    # But model_window is overwritten in the loop, so to use correct model, we can re-train or skip
+    # For simplicity, use model_window from last iteration (month_labels[-1])
+    # So we re-train here for each month to get model_window
+    y_lower = np.where(y_window["E"] == 1, y_window["T"], -np.inf)
+    y_upper = y_window["T"]
+    dtrain_window = xgb.DMatrix(data=X_window, label=y_upper)
+    dtrain_window.set_float_info("label_lower_bound", y_lower)
+    dtrain_window.set_float_info("label_upper_bound", y_upper)
+    params = {
+        "objective": "survival:aft",
+        "aft_loss_distribution": "normal",
+        "aft_loss_distribution_scale": 1.0,
+        "learning_rate": 0.05,
+        "max_depth": 4,
+        "subsample": 0.8,
+        "colsample_bynode": 0.8,
+        "random_state": 42,
+        "nthread": -1,
+        "verbosity": 1
+    }
+    model_window = xgb.train(
+        params=params,
+        dtrain=dtrain_window,
+        num_boost_round=100
+    )
+    pred = model_window.predict(xgb.DMatrix(X_window))
+    sigma = params["aft_loss_distribution_scale"]
+    t_min = y_window["T"].min()
+    t_max = y_window["T"].max()
+    times = np.linspace(t_min, t_max * 0.999, 50)
 
-# SHAP 중요도 바 플롯
-plt.figure(figsize=(6, 4))
-sns.barplot(x=top10.values, y=top10.index)
-plt.title(f"Top 10 features SHAP importance")
-plt.xlabel("SHAP importance")
-plt.ylabel("feature")
-plt.tight_layout()
-plt.show()
+    estimate = np.zeros((len(pred), len(times)))
+    for j, t in enumerate(times):
+        estimate[:, j] = 1 - norm.cdf(np.log(t), loc=np.log(pred), scale=sigma)
 
-# 시각화: Top 10 feature들의 월별 SHAP 평균값 추이
-plt.figure(figsize=(12, 6))
-for col in top10.index:
-    sns.lineplot(x=monthly_df.index.astype(str), y=monthly_df[col], label=col)
-plt.title(f"Monthly SHAP average for Top 10 features")
-plt.xlabel("issue_month")
-plt.ylabel("Average SHAP value")
-plt.legend()
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.show()
+    ibs = integrated_brier_score(y_sksurv, y_sksurv, estimate, times)
+    ibs_records.append({"issue_month": month, "ibs": ibs})
+
+# Save results
+cindex_df = pd.DataFrame(cindex_records)
+cindex_df.to_csv("../../reports/monthly_cindex.csv", index=False)
+
+ibs_df = pd.DataFrame(ibs_records)
+ibs_df.to_csv("../../reports/monthly_ibs.csv", index=False)
+print("📁 월별 C-index 및 IBS 저장 완료")
