@@ -106,52 +106,77 @@ if X_train.shape[0] == 0:
     y_train = df.loc[train_mask, ["T", "E"]]
     y_test  = df.loc[~train_mask, ["T", "E"]]
 
+
 # --------------------------------------------------
-# 4) Nelson-Aalen 기반 Hazard Rate 추정
+# 4) 관측 시점 기준 누적 Nelson-Aalen Hazard 추정
 # --------------------------------------------------
 naf = NelsonAalenFitter()
-df["issue_month"] = df["issue_d"].dt.to_period("M")
-monthly_hazards = {}
-monthly_events = {}
-monthly_ci = {}
+df["obs_month"] = (df["issue_d"] + pd.to_timedelta(df["T"], unit="D")).dt.to_period("M")
+observation_months = sorted(df["obs_month"].unique())
 
-unique_months = sorted(df["issue_month"].unique())
+na_obs_hazard = {}
+na_obs_events = {}
 
-for month in unique_months:
-    df_window = df[df["issue_month"] <= month]
+for obs_month in observation_months:
+    df_window = df[df["obs_month"] <= obs_month]
     if df_window.shape[0] < 100:
         continue
     try:
         naf.fit(df_window["T"], event_observed=df_window["E"])
-        cum_hazard = naf.cumulative_hazard_
-        inst_hazard = cum_hazard.diff().fillna(0)
-        monthly_hazards[str(month)] = inst_hazard.mean().values[0]
-
-        # 월별 부도 사건 수 저장 (누적 기준)
-        monthly_events[str(month)] = int(df_window["E"].sum())
-
-        # 신뢰구간 저장 (마지막 시점 기준)
-        ci_df = naf.confidence_interval_
-        if not ci_df.empty:
-            last_ci = ci_df.iloc[-1]
-            monthly_ci[str(month)] = (last_ci[0], last_ci[1])
+        na_obs_hazard[str(obs_month)] = float(naf.cumulative_hazard_.iloc[-1, 0])
+        na_obs_events[str(obs_month)] = int(df_window["E"].sum())
     except Exception as e:
-        print(f"⚠️ {month} 누적 hazard 계산 오류: {e}")
+        print(f"⚠️ {obs_month} 관측기준 NA hazard 계산 오류: {e}")
         continue
 
-# hazard 평균값 시계열 시각화
+# 시각화
 import matplotlib.pyplot as plt
 plt.figure(figsize=(12, 5))
-plt.plot(monthly_hazards.keys(), monthly_hazards.values(), marker="o", label="NA estimated hazard")
-plt.title("Monthly Nelson-Aalen estimated Hazard Rate")
-plt.xlabel("issued month")
-plt.ylabel("avg Hazard")
+plt.plot(na_obs_hazard.keys(), na_obs_hazard.values(), marker="o", label="NA cumulative hazard by obs_month")
+plt.title("Cumulative Hazard by Observation Month (Nelson-Aalen)")
+plt.xlabel("observation month")
+plt.ylabel("Cumulative Hazard")
 plt.xticks(rotation=45)
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
-print("✅ NA 기반 월별 hazard 추정 완료")
+print("✅ 관측 기준 NA 누적 hazard 추정 완료")
+
+# --------------------------------------------------
+# 4-c) 관측 시점 기준 NA 누적위험 월별 변화량 계산
+# --------------------------------------------------
+na_obs_delta = {}
+na_obs_sorted_keys = sorted(na_obs_hazard.keys())
+
+for i in range(1, len(na_obs_sorted_keys)):
+    prev_month = na_obs_sorted_keys[i - 1]
+    curr_month = na_obs_sorted_keys[i]
+    delta = na_obs_hazard[curr_month] - na_obs_hazard[prev_month]
+    na_obs_delta[curr_month] = delta
+
+# 결과 저장
+na_obs_delta_df = pd.DataFrame({
+    "month": list(na_obs_delta.keys()),
+    "delta": list(na_obs_delta.values())
+})
+na_obs_delta_df.to_csv("../../reports/monthly_na_delta.csv", index=False)
+print("📁 관측 기준 NA 월별 위험 증가량 저장 완료: monthly_na_delta.csv")
+
+# --------------------------------------------------
+# 4-d) 관측 기준 NA 월별 위험 증가량 시각화
+# --------------------------------------------------
+plt.figure(figsize=(12, 5))
+plt.plot(na_obs_delta.keys(), na_obs_delta.values(), marker="o", label="Δ NA hazard (month-over-month)")
+plt.title("Monthly Increase in NA Cumulative Hazard (Observation Month)")
+plt.xlabel("Observation Month")
+plt.ylabel("Hazard Increase (Δ)")
+plt.xticks(rotation=45)
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+print("📊 관측 기준 NA 누적위험 증가량 시각화 완료")
 
 # --------------------------------------------------
 # 5-2) 월별 누적 SHAP 분석 및 위험 추정 저장
