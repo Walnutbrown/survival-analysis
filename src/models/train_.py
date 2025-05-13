@@ -211,7 +211,7 @@ for month in unique_months:
 
     params = {
         "objective": "survival:aft",
-        "aft_loss_distribution": "logistic",
+        "aft_loss_distribution": "extreme",
         "aft_loss_distribution_scale": 1.0,
         "learning_rate": 0.05,
         "max_depth": 4,
@@ -343,7 +343,7 @@ for i, month in enumerate(month_labels):
     dtrain_window.set_float_info("label_upper_bound", y_upper)
     params = {
         "objective": "survival:aft",
-        "aft_loss_distribution": "logistic",
+        "aft_loss_distribution": "extreme",
         "aft_loss_distribution_scale": 1.0,
         "learning_rate": 0.05,
         "max_depth": 4,
