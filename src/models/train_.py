@@ -106,6 +106,8 @@ if X_train.shape[0] == 0:
 naf = NelsonAalenFitter()
 df["issue_month"] = df["issue_d"].dt.to_period("M")
 monthly_hazards = {}
+monthly_events = {}
+monthly_ci = {}
 
 for month, group_df in df.groupby("issue_month"):
     if len(group_df) < 100:
@@ -113,9 +115,17 @@ for month, group_df in df.groupby("issue_month"):
     try:
         naf.fit(group_df["T"], event_observed=group_df["E"])
         cum_hazard = naf.cumulative_hazard_
-        # 순간 hazard ≈ 누적 hazard 차분
         inst_hazard = cum_hazard.diff().fillna(0)
         monthly_hazards[str(month)] = inst_hazard.mean().values[0]
+
+        # 추가 기능 1: 월별 부도 사건 수 저장
+        monthly_events[str(month)] = int(group_df["E"].sum())
+
+        # 추가 기능 2: 신뢰구간 저장 (마지막 시점 기준)
+        ci_df = naf.confidence_interval_
+        if not ci_df.empty:
+            last_ci = ci_df.iloc[-1]
+            monthly_ci[str(month)] = (last_ci[0], last_ci[1])
     except Exception as e:
         print(f"⚠️ {month} 월 hazard 계산 오류: {e}")
         continue
@@ -181,6 +191,31 @@ monthly_shap = shap_df.groupby("issue_month")[features].mean()
 print("✅ XGBoost AFT 기반 월별 SHAP 계산 완료")
 
 # --------------------------------------------------
+# 5-1) Nelson-Aalen hazard와 SHAP 기반 변수 기여도의 상관성 분석
+# --------------------------------------------------
+
+from scipy.stats import pearsonr
+
+# 전체 SHAP 중요도 기준 상위 3개 변수 선택
+global_mean_abs = shap_df[features].abs().mean()
+top3_features = global_mean_abs.sort_values(ascending=False).head(3).index.tolist()
+
+# 해당 변수들의 월별 평균값 합계 (monthly_shap 기준)
+monthly_shap_top3_sum = monthly_shap[top3_features].sum(axis=1)
+
+# 공통 월만 사용하여 monthly_hazards와 정렬
+common_months = monthly_shap_top3_sum.index.intersection(pd.PeriodIndex(monthly_hazards.keys(), freq="M"))
+hazard_series = pd.Series(monthly_hazards).astype(float)
+hazard_series.index = pd.PeriodIndex(hazard_series.index, freq="M")
+
+aligned_hazard = hazard_series[common_months]
+aligned_shap = monthly_shap_top3_sum[common_months]
+
+# 상관계수 계산
+r, p = pearsonr(aligned_hazard.values, aligned_shap.values)
+print(f"📊 Nelson-Aalen hazard와 SHAP Top-3 합계의 Pearson 상관계수: r = {r:.3f}, p = {p:.3f}")
+
+# --------------------------------------------------
 # 6) 테스트 성능
 # --------------------------------------------------
 
@@ -201,8 +236,10 @@ y_test_sksurv  = Surv.from_arrays(event=y_test["E"].astype(bool), time=y_test["T
 # (2) AFT 모델의 예측값 사용
 predicted = model.predict(xgb.DMatrix(X_test))
 
-# (3) IBS 계산 (예: 테스트 기간 내 분위수 기반 시점 설정)
-times = np.percentile(y_test["T"], np.linspace(10, 90, 50))
+ # (3) IBS 계산 (예: 테스트 기간 내 분위수 기반 시점 설정)
+t_min = y_test["T"].min()
+t_max = y_test["T"].max()
+times = np.linspace(t_min, t_max * 0.999, 50)
 ibs = integrated_brier_score(y_train_sksurv, y_test_sksurv, predicted, times)
 print(f"Integrated Brier Score (IBS): {ibs:.4f}")
 
