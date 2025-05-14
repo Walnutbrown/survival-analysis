@@ -1,6 +1,3 @@
-
-
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -46,11 +43,14 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
-# 4. SHAP Longform Lineplot
+# 4. SHAP Longform Lineplot (Top 10)
 shap_long = pd.read_csv("../../reports/monthly_top10_shap_longform.csv")
+top10_features_long = shap_long.groupby("feature")["mean_abs_shap"].mean().sort_values(ascending=False).head(10).index
+shap_long_top10 = shap_long[shap_long["feature"].isin(top10_features_long)]
+
 plt.figure(figsize=(14, 6))
-sns.lineplot(data=shap_long, x="issue_month", y="mean_abs_shap", hue="feature")
-plt.title("SHAP Mean Contribution per Feature Over Time")
+sns.lineplot(data=shap_long_top10, x="issue_month", y="mean_abs_shap", hue="feature")
+plt.title("Top 10 SHAP Mean Contribution per Feature Over Time")
 plt.xlabel("Month")
 plt.ylabel("Mean Absolute SHAP Value")
 plt.xticks(rotation=45)
